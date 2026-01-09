@@ -17,7 +17,7 @@ infrastructure using ESP-NOW and provides a real-time "God View" dashboard.
 🛠️ Tech Stack
 * Hardware: ESP32 (ESP-NOW Protocol)
 * Middleware: Python (PySerial + FastAPI)
-* Frontend: HTML5 + Vue.js 3 + Tailwind CSS
+* Frontend: HTML5 + Vue.js 3 + CSS
 
 💻 Quick Start
 1. Firmware: Flash `firmware.ino` to ESP32 nodes (Change `NODE_ID` for each).
