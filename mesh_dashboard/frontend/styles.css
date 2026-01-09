@@ -1,0 +1,155 @@
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #0f1115;
+  color: #eaeaea;
+}
+
+header {
+  padding: 15px;
+  background: linear-gradient(90deg, #161a22, #1f2433);
+  text-align: center;
+  border-bottom: 1px solid #2a2f3d;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  color: #eaeaea;
+}
+
+main {
+  padding: 15px;
+}
+
+#top-panels {
+  display: flex;
+  gap: 15px;
+}
+
+.panel {
+  background: #1c1f2a;
+  padding: 15px;
+  border-radius: 8px;
+  flex: 1;
+}
+
+.node-panel {
+  flex: 2;
+}
+
+.panel h2 {
+  margin-top: 0;
+}
+
+input, select, button {
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 5px;
+  border: none;
+}
+
+button {
+  cursor: pointer;
+}
+
+#nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.node-card {
+  background: #2a2f3d;
+  padding: 10px;
+  border-radius: 6px;
+  width: 160px;
+  border-left: 6px solid green;
+}
+
+.node-card.degraded { border-color: orange; }
+.node-card.offline { border-color: red; }
+.node-card.sos { animation: blink 1s infinite; }
+
+@keyframes blink {
+  50% { opacity: 0.4; }
+}
+
+.logs {
+  margin-top: 15px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.log-entry {
+  padding: 5px;
+  border-bottom: 1px solid #333;
+}
+
+.sos-panel button {
+  background: red;
+  color: white;
+  font-size: 18px;
+}
+
+#networkStatus {
+  text-align: center;
+  padding: 8px;
+  background: #1f7a1f;
+  margin: 10px 15px;
+  border-radius: 6px;
+  font-weight: bold;
+}
+
+/* ---- SOS BUTTON ---- */
+
+.sos-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+#sosBtn {
+  width: 120px;
+  height: 120px;
+  background: radial-gradient(circle, #ff3b3b, #b30000);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  font-weight: bold;
+  color: white;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: 0 0 25px rgba(255, 0, 0, 0.6);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+#sosBtn:hover {
+  transform: scale(1.08);
+}
+
+#sosBtn.active {
+  animation: sosPulse 1.2s infinite;
+}
+
+@keyframes sosPulse {
+  0%   { box-shadow: 0 0 15px rgba(255,0,0,0.6); }
+  50%  { box-shadow: 0 0 35px rgba(255,0,0,1); }
+  100% { box-shadow: 0 0 15px rgba(255,0,0,0.6); }
+}
+
+#sosBtn {
+  text-transform: uppercase;
+}
+
+/* Text style when SOS is ON */
+#sosBtn.active {
+  font-size: 26px;
+  letter-spacing: 1px;
+}
