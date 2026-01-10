@@ -1,10 +1,16 @@
+/**
+ * ESP32 Mesh System (FIXED JSON & BRIDGE SUPPORT)
+ * - Added "is_direct" field for Frontend Host Detection
+ * - Compatible with Python Bridge
+ */
+
 #include <esp_now.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 
 // ================= USER CONFIGURATION =================
 #define WIFI_CHANNEL 1
-#define NODE_ID 'C'      
+#define NODE_ID 'B'        // <--- CHANGE THIS IF NEEDED ('A', 'B', 'C', 'D')
 
 // --- PINS ---
 #define ROUTE_LED 32       
@@ -15,14 +21,13 @@
 #define DEDUP_SIZE 50 
 
 // --- DTN CONFIGURATION ---
-#define DTN_BUFFER_SIZE 10      
-#define DTN_RETRY_DELAY 5000    
-#define DTN_PACKET_TTL 60000    
-#define RSSI_THRESHOLD -80      
+#define DTN_BUFFER_SIZE 10       
+#define DTN_RETRY_DELAY 5000     
+#define DTN_PACKET_TTL 60000     
+#define RSSI_THRESHOLD -80       
 
 // --- HEARTBEAT CONFIGURATION ---
-#define HEARTBEAT_INTERVAL 20000 // 20 Seconds
-#define NODE_TIMEOUT 25000       // 25s grace period
+#define HEARTBEAT_INTERVAL 2000 
 #define TYPE_DATA 0
 #define TYPE_HEARTBEAT 1
 
@@ -45,30 +50,13 @@ typedef struct {
   bool active;            
 } DTNEntry;
 
-// --- NEIGHBOR ENTRY STRUCTURE ---
-typedef struct {
-  char id;
-  int lastRssi;
-  unsigned long lastSeen;
-  bool isOnline;
-} Neighbor;
-
 // ================= GLOBALS =================
 uint32_t seenPackets[DEDUP_SIZE];
 int seenIndex = 0;
 DTNEntry dtnBuffer[DTN_BUFFER_SIZE]; 
 unsigned long lastDtnCheck = 0;
 
-// Heartbeat Globals
 unsigned long lastHeartbeatTimer = 0;
-
-// Neighbor Table (Index 0=A, 1=B, 2=C, 3=D)
-Neighbor neighborTable[4] = {
-  {'A', 0, 0, false},
-  {'B', 0, 0, false},
-  {'C', 0, 0, false},
-  {'D', 0, 0, false}
-};
 
 // PEER MAC ADDRESSES
 uint8_t macA[] = {0x20, 0xE7, 0xC8, 0xB4, 0xC1, 0x3C}; 
@@ -81,6 +69,38 @@ volatile bool isSirenActive = false;
 volatile bool triggerBeep = false;
 unsigned long routeLedTimer = 0;
 bool routeLedActive = false;
+
+// ================= HELPER: JSON PRINTER (FIXED) =================
+void jsonPrint(String type, Packet* pkt, int rssi) {
+  Serial.print("{");
+  Serial.print("\"type\":\""); Serial.print(type); Serial.print("\",");
+  
+  if (type == "heartbeat") {
+      // Logic for Heartbeats
+      char sender = (pkt == NULL) ? NODE_ID : pkt->src;
+      int hops = (pkt == NULL) ? 1 : pkt->hopCount;
+      bool sosState = (pkt == NULL) ? isSirenActive : pkt->isSOS;
+      
+      // CRITICAL FIX: "is_direct" tells the frontend THIS is the host node
+      bool isDirect = (pkt == NULL);
+
+      Serial.print("\"node_id\":\""); Serial.print(sender); Serial.print("\",");
+      Serial.print("\"battery\":100,"); 
+      Serial.print("\"rssi\":"); Serial.print(rssi); Serial.print(",");
+      Serial.print("\"hop_count\":"); Serial.print(hops); Serial.print(",");
+      Serial.print("\"is_direct\":"); Serial.print(isDirect ? "true" : "false"); Serial.print(",");
+      Serial.print("\"sos\":"); Serial.print(sosState ? "true" : "false");
+  } else {
+      // Logic for Messages/SOS
+      Serial.print("\"packet_id\":\""); Serial.print(pkt->packetId); Serial.print("\",");
+      Serial.print("\"from_node\":\""); Serial.print(pkt->src); Serial.print("\",");
+      Serial.print("\"to\":\""); Serial.print(pkt->dest); Serial.print("\",");
+      Serial.print("\"payload\":\""); Serial.print(pkt->msg); Serial.print("\",");
+      Serial.print("\"hop_count\":"); Serial.print(pkt->hopCount); Serial.print(",");
+      Serial.print("\"rssi\":"); Serial.print(rssi); 
+  }
+  Serial.println("}");
+}
 
 // ================= HELPER FUNCTIONS =================
 
@@ -104,76 +124,6 @@ void addToSeen(uint32_t id) {
   seenIndex = (seenIndex + 1) % DEDUP_SIZE;
 }
 
-// --- NEIGHBOR TABLE UPDATER (SILENT) ---
-void updateNeighbor(char id, int rssi) {
-  int idx = -1;
-  if (id == 'A') idx = 0;
-  else if (id == 'B') idx = 1;
-  else if (id == 'C') idx = 2;
-  else if (id == 'D') idx = 3;
-
-  if (idx != -1) {
-    neighborTable[idx].lastRssi = rssi;
-    neighborTable[idx].lastSeen = millis();
-    neighborTable[idx].isOnline = true;
-    // No print here - we wait for the table print
-  }
-}
-
-// --- SYNCHRONIZED TABLE PRINTER ---
-void printNetworkStatus() {
-  unsigned long now = millis();
-  
-  Serial.println("\n================ NETWORK STATUS ================");
-  Serial.println("| NODE |   STATUS   |  RSSI  | LAST SEEN (s) |");
-  Serial.println("|------|------------|--------|---------------|");
-
-  for (int i = 0; i < 4; i++) {
-    // Skip myself
-    if (neighborTable[i].id == NODE_ID) continue;
-
-    // Check Timeout
-    bool online = neighborTable[i].isOnline;
-    unsigned long timeSince = (now - neighborTable[i].lastSeen) / 1000;
-    
-    if (online && (now - neighborTable[i].lastSeen > NODE_TIMEOUT)) {
-        online = false;
-        neighborTable[i].isOnline = false;
-    }
-
-    // Format the row
-    String status = online ? "🟢 ONLINE " : "🔴 OFFLINE";
-    String rssiStr = online ? String(neighborTable[i].lastRssi) : " -- ";
-    
-    Serial.printf("|  %c   | %s |  %s   |      %lu      |\n", 
-                  neighborTable[i].id, 
-                  status.c_str(), 
-                  rssiStr.c_str(), 
-                  timeSince);
-  }
-  Serial.println("================================================\n");
-}
-
-void sendHeartbeatPacket() {
-  Packet hb;
-  hb.packetId = micros() + random(0xFFFF);
-  hb.packetType = TYPE_HEARTBEAT; 
-  hb.src = NODE_ID;
-  hb.dest = '*';       
-  hb.lastHop = NODE_ID;
-  hb.hopCount = 1;     
-  hb.isSOS = false;
-  strcpy(hb.msg, "HB");
-
-  uint8_t *allMacs[] = {macA, macB, macC, macD};
-  char allIds[] = {'A', 'B', 'C', 'D'};
-  
-  for(int i=0; i<4; i++) {
-    if(allIds[i] == NODE_ID) continue;
-    esp_now_send(allMacs[i], (uint8_t*)&hb, sizeof(hb));
-  }
-}
-
 // --- DTN HELPERS ---
 void storeForLater(Packet p) {
   int slot = -1;
@@ -189,11 +139,11 @@ void storeForLater(Packet p) {
       slot = i;
     }
   }
-
-  dtnBuffer[slot].pkt = p;
-  dtnBuffer[slot].storedAt = millis();
-  dtnBuffer[slot].active = true;
-  Serial.printf("💾 DTN STORED: ID %u (Slot %d)\n", p.packetId, slot);
+  if (slot != -1) {
+    dtnBuffer[slot].pkt = p;
+    dtnBuffer[slot].storedAt = millis();
+    dtnBuffer[slot].active = true;
+  }
 }
 
 void processDTN() {
@@ -205,11 +155,8 @@ void processDTN() {
     if (dtnBuffer[i].active) {
       if (now - dtnBuffer[i].storedAt > DTN_PACKET_TTL) {
         dtnBuffer[i].active = false;
-        Serial.printf("💀 DTN EXPIRED: ID %u\n", dtnBuffer[i].pkt.packetId);
         continue;
       }
-
-      Serial.printf("♻️ DTN RETRY: ID %u\n", dtnBuffer[i].pkt.packetId);
       
       uint8_t *allMacs[] = {macA, macB, macC, macD};
       char allIds[] = {'A', 'B', 'C', 'D'};
@@ -238,31 +185,32 @@ void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *data, int len) 
   int rssi = info->rx_ctrl->rssi;
   char sender = identifyNode(info->src_addr);
 
-  // --- 1. HEARTBEAT CHECK ---
+  // --- 1. OUTPUT JSON FOR BRIDGE ---
   if (pkt.packetType == TYPE_HEARTBEAT) {
-    updateNeighbor(sender, rssi);
-    return; // Silent return, no logs
+      jsonPrint("heartbeat", &pkt, rssi);
+  } else {
+      String typeStr = pkt.isSOS ? "sos" : "message";
+      jsonPrint(typeStr, &pkt, rssi);
   }
 
-  // --- NORMAL DATA PROCESSING BELOW ---
-  if (isDuplicate(pkt.packetId)) return;
-  addToSeen(pkt.packetId);
-  
-  Serial.println("-----------------------------");
-  Serial.printf("📥 RECV: %c -> %c | Msg: %s\n", pkt.src, pkt.dest, pkt.msg);
-  Serial.printf("   VIA: %c (RSSI: %d)\n", pkt.lastHop, rssi);
-  Serial.printf("   HOPS: %d (%s)\n", pkt.hopCount, (pkt.hopCount == 1) ? "Direct" : "Relayed");
-
-  if (pkt.dest == NODE_ID || pkt.dest == '*') {
-    Serial.println("✅ DESTINATION REACHED");
-    if (pkt.isSOS) {
-        isSirenActive = true; 
-    } else {
-        triggerBeep = true;
-    }
-    if (pkt.dest != '*') return; 
+  // --- 2. HARDWARE LOGIC ---
+  if (pkt.packetType != TYPE_HEARTBEAT) {
+      if (isDuplicate(pkt.packetId)) return;
+      addToSeen(pkt.packetId);
+      
+      if (pkt.dest == NODE_ID || pkt.dest == '*') {
+        if (pkt.isSOS) {
+            isSirenActive = true; 
+        } else {
+            triggerBeep = true;
+        }
+        if (pkt.dest != '*') return; 
+      }
+  } else {
+      return; 
   }
 
+  // --- 3. RELAY LOGIC ---
   if (pkt.hopCount < MAX_HOPS) {
     pkt.hopCount++;        
     pkt.lastHop = NODE_ID; 
@@ -270,20 +218,16 @@ void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *data, int len) 
     bool shouldRelayNow = false;
 
     if (pkt.isSOS) {
-        Serial.println("🚨 SOS - IMMEDIATE RELAY");
         shouldRelayNow = true;
     } else if (rssi >= RSSI_THRESHOLD || rssi == 0) { 
-        Serial.println("🔄 RELAYING...");
         shouldRelayNow = true;
     } else {
-        Serial.printf("🐢 WEAK SIGNAL (%d) - STORING\n", rssi);
         storeForLater(pkt);
         shouldRelayNow = false;
     }
 
     if (shouldRelayNow) {
         delay(random(5, 20)); 
-
         digitalWrite(ROUTE_LED, HIGH);
         routeLedActive = true;
         routeLedTimer = millis();
@@ -297,8 +241,6 @@ void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *data, int len) 
           esp_now_send(allMacs[i], (uint8_t*)&pkt, sizeof(pkt));
         }
     }
-  } else {
-      Serial.println("❌ MAX HOPS EXCEEDED");
   }
 }
 
@@ -320,9 +262,7 @@ void setup() {
   esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
   esp_wifi_set_max_tx_power(78); 
 
-  if (esp_now_init() != ESP_OK) {
-    ESP.restart();
-  }
+  if (esp_now_init() != ESP_OK) ESP.restart();
 
   esp_now_register_recv_cb(OnDataRecv);
 
@@ -342,16 +282,10 @@ void setup() {
   registerNode(macC, 'C');
   registerNode(macD, 'D');
 
-  // Init table timestamps
-  for(int i=0; i<4; i++) {
-    neighborTable[i].lastSeen = millis(); 
-  }
-
   Serial.printf("✅ NODE %c READY\n", NODE_ID);
 }
 
 // ================= SIREN LOGIC =================
-
 void handleInfiniteSiren() {
   if (digitalRead(STOP_BTN_PIN) == LOW) {
       isSirenActive = false;
@@ -359,36 +293,14 @@ void handleInfiniteSiren() {
       Serial.println("🔕 SIREN SILENCED");
       return;
   }
-  for(int freq = 1000; freq < 3500; freq += 40) {
-    if (digitalRead(STOP_BTN_PIN) == LOW) { 
-        isSirenActive = false;
-        noTone(BUZZER_PIN);
-        Serial.println("🔕 SIREN SILENCED");
-        return;
-    }
-    tone(BUZZER_PIN, freq);
-    delay(4); 
-  }
-  for(int freq = 3500; freq > 1000; freq -= 40) {
-    if (digitalRead(STOP_BTN_PIN) == LOW) { 
-        isSirenActive = false;
-        noTone(BUZZER_PIN);
-        Serial.println("🔕 SIREN SILENCED");
-        return;
-    }
-    tone(BUZZER_PIN, freq);
-    delay(4); 
-  }
+  tone(BUZZER_PIN, 1500); delay(200);
+  tone(BUZZER_PIN, 2500); delay(200);
 }
 
 void playBeep() {
-  tone(BUZZER_PIN, 2500); 
-  delay(150);
-  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, 2500); delay(150); noTone(BUZZER_PIN);
   delay(100);
-  tone(BUZZER_PIN, 2500); 
-  delay(150);
-  noTone(BUZZER_PIN);
+  tone(BUZZER_PIN, 2500); delay(150); noTone(BUZZER_PIN);
 }
 
 // ================= LOOP =================
@@ -403,60 +315,81 @@ void loop() {
   
   processDTN();
   
-  // --- SYNCHRONIZED STATUS SYSTEM ---
   unsigned long now = millis();
   
+  // --- HEARTBEAT & BRIDGE SYNC ---
   if (now - lastHeartbeatTimer > HEARTBEAT_INTERVAL) {
-    sendHeartbeatPacket();
-    printNetworkStatus();
-    
     lastHeartbeatTimer = now;
+
+    // 1. Tell Bridge "I am alive" -> This now includes "is_direct": true
+    jsonPrint("heartbeat", NULL, -10);
+
+    // 2. Send Packet to Mesh
+    Packet hb;
+    hb.packetId = micros() + random(0xFFFF);
+    hb.packetType = TYPE_HEARTBEAT; 
+    hb.src = NODE_ID;
+    hb.dest = '*';        
+    hb.lastHop = NODE_ID;
+    hb.hopCount = 1;      
+    hb.isSOS = isSirenActive;
+    strcpy(hb.msg, "HB");
+
+    uint8_t *allMacs[] = {macA, macB, macC, macD};
+    char allIds[] = {'A', 'B', 'C', 'D'};
+    
+    for(int i=0; i<4; i++) {
+      if(allIds[i] == NODE_ID) continue;
+      esp_now_send(allMacs[i], (uint8_t*)&hb, sizeof(hb));
+    }
   }
 
-  // --- SERIAL INPUT ---
+  // --- SERIAL INPUT (HANDLES MESSAGES FROM BRIDGE) ---
   if (Serial.available()) {
     String input = Serial.readStringUntil('\n');
     input.trim();
-    if (input.length() > 0) sendUserMessage(input);
+    
+    if (input == "SOS_OFF") {
+        isSirenActive = false;
+        noTone(BUZZER_PIN);
+    } else if (input.length() > 0) {
+        // Prepare Packet
+        Packet pkt;
+        pkt.packetId = micros() + random(0xFFFF); 
+        pkt.packetType = TYPE_DATA; 
+        pkt.src = NODE_ID;
+        pkt.dest = '*'; 
+        pkt.lastHop = NODE_ID;
+        pkt.hopCount = 1; 
+        
+        if (input.startsWith("SOS")) {
+          pkt.isSOS = true;
+          sprintf(pkt.msg, "%s", input.c_str());
+        } else if (input.indexOf(':') > 0) {
+          pkt.dest = input.charAt(0);
+          pkt.isSOS = false;
+          String msgContent = input.substring(2);
+          msgContent.toCharArray(pkt.msg, 64);
+        } else {
+           // Default Broadcast
+           pkt.isSOS = false;
+           input.toCharArray(pkt.msg, 64);
+        }
+
+        addToSeen(pkt.packetId);
+        
+        uint8_t *allMacs[] = {macA, macB, macC, macD};
+        char allIds[] = {'A', 'B', 'C', 'D'};
+
+        for(int i=0; i<4; i++) {
+          if(allIds[i] == NODE_ID) continue;
+          esp_now_send(allMacs[i], (uint8_t*)&pkt, sizeof(pkt));
+        }
+    }
   }
 
   if (routeLedActive && (millis() - routeLedTimer > 100)) {
     digitalWrite(ROUTE_LED, LOW);
     routeLedActive = false;
-  }
-}
-
-void sendUserMessage(String input) {
-  Packet pkt;
-  pkt.packetId = micros() + random(0xFFFF); 
-  pkt.packetType = TYPE_DATA; 
-  pkt.src = NODE_ID;
-  pkt.dest = '*'; 
-  pkt.lastHop = NODE_ID;
-  pkt.hopCount = 1; 
-  
-  if (input.startsWith("SOS")) {
-    pkt.dest = '*';
-    pkt.isSOS = true;
-    sprintf(pkt.msg, "%s", input.c_str());
-  } else if (input.indexOf(':') > 0) {
-    pkt.dest = input.charAt(0);
-    pkt.isSOS = false;
-    String msgContent = input.substring(2);
-    msgContent.toCharArray(pkt.msg, 64);
-  } else {
-    Serial.println("Format: 'C:Hello' or 'SOS'");
-    return;
-  }
-
-  addToSeen(pkt.packetId);
-  Serial.printf("📤 SENDING to %c (ID: %u)\n", pkt.dest, pkt.packetId);
-
-  uint8_t *allMacs[] = {macA, macB, macC, macD};
-  char allIds[] = {'A', 'B', 'C', 'D'};
-
-  for(int i=0; i<4; i++) {
-    if(allIds[i] == NODE_ID) continue;
-    esp_now_send(allMacs[i], (uint8_t*)&pkt, sizeof(pkt));
   }
 }
